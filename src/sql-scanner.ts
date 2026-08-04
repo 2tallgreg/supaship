@@ -9,6 +9,7 @@ import type {
 
 const IDENT = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`
 const QUALIFIED_IDENT = String.raw`${IDENT}(?:\s*\.\s*${IDENT})?`
+const MANAGED_SCHEMAS = String.raw`(?:auth|storage|realtime|vault|extensions|graphql(?:_public)?|net|supabase_functions|supabase_migrations)`
 
 interface Statement {
   text: string
@@ -269,12 +270,20 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-function hasObjectReference(statement: string, objectName: string): boolean {
+function identifierPattern(name: string): string {
+  return `(?:"${escapeRegex(name)}"|\\b${escapeRegex(name)}\\b)`
+}
+
+function hasObjectReference(statement: string, objectName: string, defaultSchema = "public"): boolean {
   const [schema, name] = objectName.split(".")
   if (!schema || !name) return false
-  const plain = new RegExp(`\\b${escapeRegex(schema)}\\s*\\.\\s*${escapeRegex(name)}\\b`, "i")
-  const quoted = new RegExp(`"${escapeRegex(schema)}"\\s*\\.\\s*"${escapeRegex(name)}"`, "i")
-  return plain.test(statement) || quoted.test(statement)
+  const qualified = new RegExp(`${identifierPattern(schema)}\\s*\\.\\s*${identifierPattern(name)}`, "i")
+  if (qualified.test(statement)) return true
+  // An unqualified reference resolves to the default schema, so
+  // `revoke all on notes ...` covers public.notes.
+  if (schema !== defaultSchema) return false
+  const bare = new RegExp(`(?:^|[^.\\w"])${identifierPattern(name)}(?![.\\w])`, "i")
+  return bare.test(statement)
 }
 
 function statementObject(statement: string, kind: string): { raw: string; index: number } | undefined {
@@ -307,7 +316,7 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
   const findings: Finding[] = []
   const createdTables = new Map<string, LocatedObject>()
   const rlsEnabled = new Set<string>()
-  const accessDecisions = new Set<string>()
+  const materializedViews: LocatedObject[] = []
   const functions: FunctionRecord[] = []
   let hasRlsChange = false
 
@@ -370,19 +379,12 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
       })
     }
 
-    if (/^\s*(?:grant|revoke)\b/i.test(text)) {
-      for (const table of createdTables.keys()) {
-        if (hasObjectReference(text, table)) accessDecisions.add(table)
-      }
-    }
-
     const createPolicy = /^\s*create\s+policy\b/i.test(text)
     if (createPolicy) {
       hasRlsChange = true
       const target = new RegExp(String.raw`\bon\s+(?:table\s+)?(${QUALIFIED_IDENT})`, "i").exec(text)
       const object = target?.[1] ? normalizeObjectName(target[1]) : undefined
       const operation = /\bfor\s+(all|select|insert|update|delete)\b/i.exec(text)?.[1]?.toLowerCase() ?? "all"
-      const hasUsing = /\busing\s*\(/i.test(text)
       const hasWithCheck = /\bwith\s+check\s*\(/i.test(text)
       const openUsing = /\busing\s*\(\s*true\s*\)/i.test(text)
       const openCheck = /\bwith\s+check\s*\(\s*true\s*\)/i.test(text)
@@ -394,11 +396,16 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
         })
       }
 
+      // Postgres reuses USING for WITH CHECK when the latter is omitted, so
+      // only a literally-open expression makes a write policy unconditional.
       const unconditionallyOpen =
-        (operation === "insert" && (!hasWithCheck || openCheck)) ||
-        (operation === "delete" && (!hasUsing || openUsing)) ||
-        ((operation === "update" || operation === "all") &&
-          (!hasUsing || !hasWithCheck || openUsing || openCheck))
+        operation === "insert"
+          ? openCheck
+          : operation === "delete"
+            ? openUsing
+            : operation === "update" || operation === "all"
+              ? openUsing || openCheck
+              : false
       if (unconditionallyOpen) {
         add("SUPA005", statement, `${operation.toUpperCase()} policy${object ? ` on ${object}` : ""} permits writes without a row-level constraint.`, {
           object,
@@ -433,12 +440,21 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
     const createView = statementObject(text, String.raw`create\s+(?:or\s+replace\s+)?(?:materialized\s+)?view`)
     if (createView) {
       const name = normalizeObjectName(createView.raw)
-      if (config.exposedSchemas.includes(objectSchema(name)) && !/\bsecurity_invoker\s*=\s*(?:true|on)\b/i.test(text)) {
-        add("SUPA008", statement, `Exposed view ${name} does not declare security_invoker = true.`, {
-          offset: createView.index,
-          object: name,
-          suggestion: "Create the view WITH (security_invoker = true), or keep it in an unexposed schema with explicit grants.",
-        })
+      if (config.exposedSchemas.includes(objectSchema(name))) {
+        if (/^\s*create\s+(?:or\s+replace\s+)?materialized\b/i.test(text)) {
+          materializedViews.push({
+            name,
+            source: statement.source,
+            offset: statement.offset + createView.index,
+            line: lineAt(statement.source.content, statement.offset + createView.index),
+          })
+        } else if (!/\bsecurity_invoker\s*=\s*(?:true|on)\b/i.test(text)) {
+          add("SUPA008", statement, `Exposed view ${name} does not declare security_invoker = true.`, {
+            offset: createView.index,
+            object: name,
+            suggestion: "Create the view WITH (security_invoker = true), or keep it in an unexposed schema with explicit grants.",
+          })
+        }
       }
     }
 
@@ -492,7 +508,7 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
     }
 
     const managedObject = new RegExp(
-      String.raw`^\s*(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:table|view|function|schema)\s+(?:if\s+(?:not\s+)?exists\s+)?((?:auth|storage|realtime)\s*\.\s*${IDENT}|(?:auth|storage|realtime)\b)`,
+      String.raw`^\s*(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:table|view|function|schema)\s+(?:if\s+(?:not\s+)?exists\s+)?(${MANAGED_SCHEMAS}\s*\.\s*${IDENT}|${MANAGED_SCHEMAS}\b)`,
       "i",
     ).exec(text)
     if (managedObject?.[1]) {
@@ -512,6 +528,10 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
     }
   }
 
+  const grantRevokeStatements = statements.filter((statement) => /^\s*(?:grant|revoke)\b/i.test(statement.text))
+  const hasAccessDecision = (objectName: string): boolean =>
+    grantRevokeStatements.some((statement) => hasObjectReference(statement.text, objectName))
+
   for (const table of createdTables.values()) {
     if (!config.exposedSchemas.includes(objectSchema(table.name))) continue
     if (!rlsEnabled.has(table.name)) {
@@ -520,19 +540,20 @@ export function scanSql(sources: SqlSource[], config: ResolvedConfig): ScanRepor
         suggestion: `Add ALTER TABLE ${table.name} ENABLE ROW LEVEL SECURITY in the same migration.`,
       })
     }
-    const hasAccessDecision =
-      accessDecisions.has(table.name) ||
-      statements.some(
-        (statement) =>
-          /^\s*(?:grant|revoke)\b/i.test(statement.text) &&
-          hasObjectReference(statement.text, table.name),
-      )
-    if (!hasAccessDecision) {
+    if (!hasAccessDecision(table.name)) {
       add("SUPA002", table, `New exposed table ${table.name} has no explicit GRANT or REVOKE decision.`, {
         object: table.name,
         suggestion: "Grant only the Data API privileges the table needs, or explicitly revoke access from anon and authenticated.",
       })
     }
+  }
+
+  for (const view of materializedViews) {
+    if (hasAccessDecision(view.name)) continue
+    add("SUPA008", view, `Exposed materialized view ${view.name} is served by the Data API without row security.`, {
+      object: view.name,
+      suggestion: "Materialized views cannot use security_invoker: move it to a private schema, or revoke SELECT from anon and authenticated and expose a controlled view instead.",
+    })
   }
 
   for (const fn of functions) {

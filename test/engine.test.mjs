@@ -18,7 +18,9 @@ function git(root, ...args) {
   execFileSync("git", args, { cwd: root, stdio: "ignore" })
 }
 
-async function project() {
+async function project(options = {}) {
+  const sqlDirectory = options.sqlDirectory ?? "supabase/migrations"
+  const testDirectory = options.testDirectory ?? "supabase/tests"
   const root = await mkdtemp(path.join(os.tmpdir(), "supaship-engine-"))
   git(root, "init", "-b", "main")
   git(root, "config", "user.name", "Supaship Test")
@@ -28,19 +30,21 @@ async function project() {
   git(root, "commit", "-m", "initial")
   git(root, "switch", "-c", "feature")
 
-  await mkdir(path.join(root, "supabase/migrations"), { recursive: true })
-  await mkdir(path.join(root, "supabase/tests"), { recursive: true })
-  await writeFile(path.join(root, "supabase/migrations/20260803000000_appraisals.sql"), safeSql)
+  await mkdir(path.join(root, sqlDirectory), { recursive: true })
+  await mkdir(path.join(root, testDirectory), { recursive: true })
+  await writeFile(path.join(root, `${sqlDirectory}/20260803000000_appraisals.sql`), safeSql)
   await writeFile(
-    path.join(root, "supabase/tests/appraisals.test.sql"),
+    path.join(root, `${testDirectory}/appraisals.test.sql`),
     "begin; select plan(1); select ok(true, 'fixture'); select * from finish(); rollback;\n",
   )
-  git(root, "add", "supabase")
+  git(root, "add", ".")
   git(root, "commit", "-m", "add safe schema")
 
   const config = loadConfig(root, {
     baseRef: "main",
     generatedTypes: false,
+    sqlDirectories: [sqlDirectory],
+    testDirectories: [testDirectory],
     checks: [
       {
         id: "fixture-check",
@@ -95,4 +99,30 @@ test("guard patterns cover shipping commands but permit dry runs", async () => {
   assert.equal(isGuardedCommand("gh pr create --fill", config), true)
   assert.equal(isGuardedCommand("supabase db push --dry-run", config), false)
   assert.equal(isGuardedCommand("git status", config), false)
+})
+
+test("a dry run in a compound command does not exempt the other commands", async () => {
+  const { config } = await project()
+  assert.equal(isGuardedCommand("git push --dry-run && git push origin main", config), true)
+  assert.equal(isGuardedCommand("supabase db push --dry-run; supabase db push", config), true)
+  assert.equal(isGuardedCommand("git status && git push", config), true)
+  assert.equal(isGuardedCommand("git fetch && supabase db push --dry-run", config), false)
+})
+
+test("custom SQL directories outside supabase/ still require verification evidence", async () => {
+  const { engine } = await project({ sqlDirectory: "db/migrations", testDirectory: "db/tests" })
+  const before = await engine.inspect()
+  assert.equal(before.ready, false)
+  assert.deepEqual(before.missingEvidence, ["fixture-check"])
+
+  const verified = await engine.verify()
+  assert.equal(verified.ready, true)
+})
+
+test("approve rejects a fingerprint that changed since it was requested", async () => {
+  const { engine } = await project()
+  await assert.rejects(
+    engine.approve("Reviewed the rollout manually", 10, "0".repeat(64)),
+    /changed while approval was pending/,
+  )
 })

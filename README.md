@@ -11,7 +11,7 @@ The product is **Supaship**. The npm package is **`opencode-supaship`** because 
 - UPDATE policies include `WITH CHECK`; write policies are not unconditionally open.
 - Policies do not authorize with deprecated `auth.role()` or user-editable metadata.
 - `auth.uid()` and `auth.jwt()` use the RLS init-plan pattern, `(select auth.uid())`.
-- Exposed views use `security_invoker = true`.
+- Exposed views use `security_invoker = true`; exposed materialized views make an explicit access decision.
 - `SECURITY DEFINER` functions stay out of exposed schemas, lock `search_path`, check caller identity, and revoke default execution.
 - Migrations do not disable RLS, broadly grant privileges, modify Supabase-managed schema objects, delete old migrations, or perform destructive DDL without approval.
 - RLS changes have pgTAP tests.
@@ -65,7 +65,7 @@ Typical flow:
 4. If generated types are stale, run `supaship_sync_types`, then verify again.
 5. Push, create the PR, or merge. Supaship allows the guarded command only while evidence matches the current fingerprint.
 
-By default Supaship intercepts agent-issued `supabase db push`, `git push`, `gh pr create`, and `gh pr merge`. `--dry-run` commands are allowed. Commands typed directly in a separate shell are outside OpenCode's plugin hooks and cannot be intercepted.
+By default Supaship intercepts agent-issued `supabase db push`, `git push`, `gh pr create`, and `gh pr merge`. `--dry-run` commands are allowed, and every command in a compound shell line is checked separately, so `git push --dry-run && git push` is still blocked. Commands typed directly in a separate shell are outside OpenCode's plugin hooks and cannot be intercepted.
 
 ## CLI
 
@@ -152,7 +152,7 @@ Each rule accepts `"error"`, `"warning"`, `"info"`, or `"off"`:
 | `SUPA005` | error | A write policy is unconditionally open. |
 | `SUPA006` | warning | A policy uses `auth.role()`. |
 | `SUPA007` | error | Authorization uses user-editable metadata. |
-| `SUPA008` | error | An exposed view lacks `security_invoker`. |
+| `SUPA008` | error | An exposed view lacks `security_invoker`, or an exposed materialized view lacks an access decision. |
 | `SUPA009` | error | A `SECURITY DEFINER` function is exposed. |
 | `SUPA010` | error | A definer function has an unsafe `search_path`. |
 | `SUPA011` | warning | Definer execution is not revoked from `PUBLIC`. |

@@ -60,3 +60,68 @@ test("comments do not trigger destructive-DDL findings", () => {
   const report = scanSql([source], config)
   assert.deepEqual(report.findings, [])
 })
+
+function scan(content) {
+  return scanSql([{ path: "supabase/migrations/inline.sql", content }], config)
+}
+
+test("a constrained ALL policy without WITH CHECK needs the explicit clause but is not open", () => {
+  const report = scan(`
+    create table public.notes (id uuid primary key, owner uuid);
+    alter table public.notes enable row level security;
+    grant select, insert, update on table public.notes to authenticated;
+    create policy notes_all on public.notes for all to authenticated
+      using ((select auth.uid()) = owner);
+  `)
+  const ids = report.findings.map((finding) => finding.ruleId)
+  assert.deepEqual(ids, ["SUPA004"])
+})
+
+test("literally-open write policies are flagged and open SELECT policies are not", () => {
+  const open = scan(`
+    create table public.notes (id uuid primary key, owner uuid);
+    alter table public.notes enable row level security;
+    grant all on table public.notes to authenticated;
+    create policy notes_insert on public.notes for insert to authenticated with check (true);
+  `)
+  assert.ok(open.findings.some((finding) => finding.ruleId === "SUPA005"))
+
+  const publicRead = scan(`
+    create table public.notes (id uuid primary key, owner uuid);
+    alter table public.notes enable row level security;
+    grant select on table public.notes to anon;
+    create policy notes_read on public.notes for select to anon using (true);
+  `)
+  assert.ok(!publicRead.findings.some((finding) => finding.ruleId === "SUPA005"))
+})
+
+test("unqualified grants and revokes count as Data API access decisions", () => {
+  const report = scan(`
+    create table public.notes (id uuid primary key, owner uuid);
+    alter table public.notes enable row level security;
+    revoke all on notes from anon, authenticated;
+    create policy notes_read on public.notes for select to authenticated
+      using ((select auth.uid()) = owner);
+  `)
+  assert.deepEqual(report.findings, [])
+})
+
+test("exposed materialized views need an explicit access decision", () => {
+  const undecided = scan("create materialized view public.stats as select 1 as total;")
+  assert.deepEqual(undecided.findings.map((finding) => finding.ruleId), ["SUPA008"])
+
+  const revoked = scan(`
+    create materialized view public.stats as select 1 as total;
+    revoke select on public.stats from anon, authenticated;
+  `)
+  assert.deepEqual(revoked.findings, [])
+})
+
+test("managed-schema protection covers vault and extensions", () => {
+  const report = scan(`
+    alter table vault.secrets add column exposed boolean;
+    create function extensions.sneaky() returns void language sql as $$ select 1 $$;
+  `)
+  const ids = report.findings.map((finding) => finding.ruleId)
+  assert.deepEqual([...new Set(ids)], ["SUPA015"])
+})
