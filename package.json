@@ -1,6 +1,6 @@
 {
   "name": "opencode-supaship",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A deterministic Supabase shipping gate for OpenCode.",
   "type": "module",
   "main": "./dist/index.js",
@@ -30,6 +30,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build",
     "pack:check": "npm pack --dry-run --cache .npm-cache"
   },
   "dependencies": {
@@ -53,7 +54,10 @@
   ],
   "author": "Greg Pogg",
   "license": "MIT",
-  "directories": {
-    "test": "test"
-  }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2tallgreg/supaship.git"
+  },
+  "homepage": "https://github.com/2tallgreg/supaship#readme",
+  "bugs": "https://github.com/2tallgreg/supaship/issues"
 }

@@ -147,10 +147,13 @@ export async function createSnapshot(
       item.toLowerCase().endsWith(".sql") &&
       config.sqlDirectories.some((directory) => isWithin(item, directory)),
   )
+  // "supabase" stays in the list so config.toml, seeds, and functions count
+  // even when sqlDirectories point elsewhere.
+  const relevantDirectories = [...new Set([...config.sqlDirectories, ...config.testDirectories, "supabase"])]
+  const isRelevantPath = (item: string): boolean =>
+    relevantDirectories.some((directory) => isWithin(item, directory))
   const supabaseChanged =
-    scope === "all"
-      ? sqlPaths.length > 0
-      : gitChanges.paths.some((item) => isWithin(item, "supabase"))
+    scope === "all" ? sqlPaths.length > 0 : gitChanges.paths.some(isRelevantPath)
 
   const hash = createHash("sha256")
   hash.update("supaship-fingerprint-v1\0")
@@ -167,7 +170,7 @@ export async function createSnapshot(
     ...sqlPaths,
     ...relevantDeleted,
     ...testFiles,
-    ...(scope === "changed" ? gitChanges.paths.filter((item) => isWithin(item, "supabase")) : []),
+    ...(scope === "changed" ? gitChanges.paths.filter(isRelevantPath) : []),
   ])
   if (existsSync(path.join(actualRoot, "supabase/config.toml"))) fingerprintPaths.add("supabase/config.toml")
   if (config.generatedTypes) fingerprintPaths.add(config.generatedTypes.path)

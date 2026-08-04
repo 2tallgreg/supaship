@@ -282,9 +282,18 @@ export class SupashipEngine {
     return { path: this.config.generatedTypes.path, changed, command: result }
   }
 
-  async approve(reason: string, minutes = this.config.guard.approvalMinutes): Promise<ShipReport> {
+  async approve(
+    reason: string,
+    minutes = this.config.guard.approvalMinutes,
+    expectedFingerprint?: string,
+  ): Promise<ShipReport> {
     if (!reason.trim()) throw new Error("A non-empty approval reason is required.")
     const { snapshot, scan } = await this.snapshotAndScan("changed")
+    if (expectedFingerprint && expectedFingerprint !== snapshot.fingerprint) {
+      throw new Error(
+        `The project changed while approval was pending: fingerprint is now ${snapshot.fingerprint.slice(0, 12)}, not ${expectedFingerprint.slice(0, 12)}. Review the current state and approve again.`,
+      )
+    }
     const previous = await loadEvidence(snapshot.root, this.config.stateFile)
     const state: EvidenceState = {
       ...(previous.fingerprint === snapshot.fingerprint ? previous : emptyEvidence()),

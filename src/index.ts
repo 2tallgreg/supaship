@@ -142,7 +142,7 @@ export const Supaship: Plugin = async ({ client, directory, worktree }, options 
               expiresInMinutes: args.minutes ?? config.guard.approvalMinutes,
             },
           })
-          const report = await engine.approve(args.reason, args.minutes)
+          const report = await engine.approve(args.reason, args.minutes, before.fingerprint)
           context.metadata({
             title: "Supaship override approved",
             metadata: {

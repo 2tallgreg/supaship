@@ -19,10 +19,26 @@ export function runCommand(
     const child = spawn(command, {
       cwd,
       shell: true,
+      detached: process.platform !== "win32",
       env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
       stdio: ["ignore", "pipe", "pipe"],
-      signal: options.signal,
     })
+
+    // Checks spawn their own children (supabase → docker); killing only the
+    // shell would orphan them, so terminate the whole process group.
+    const killTree = (): void => {
+      if (process.platform !== "win32" && child.pid) {
+        try {
+          process.kill(-child.pid, "SIGTERM")
+          return
+        } catch {
+          // The group is already gone; fall through to the direct kill.
+        }
+      }
+      child.kill("SIGTERM")
+    }
+    if (options.signal?.aborted) killTree()
+    else options.signal?.addEventListener("abort", killTree, { once: true })
 
     let stdout = ""
     let stderr = ""
@@ -35,8 +51,13 @@ export function runCommand(
       stderr += chunk
     })
 
+    const finish = (result: CommandResult): void => {
+      options.signal?.removeEventListener("abort", killTree)
+      resolve(result)
+    }
+
     child.on("error", (error) => {
-      resolve({
+      finish({
         command,
         exitCode: 1,
         stdout: trimOutput(stdout, maximum),
@@ -45,7 +66,7 @@ export function runCommand(
       })
     })
     child.on("close", (code) => {
-      resolve({
+      finish({
         command,
         exitCode: code ?? 1,
         stdout: trimOutput(stdout, maximum),
@@ -56,7 +77,21 @@ export function runCommand(
   })
 }
 
+function commandSegments(command: string): string[] {
+  return command
+    .split(/&&|\|\||[;|\n]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+}
+
 export function isGuardedCommand(command: string, config: ResolvedConfig): boolean {
-  if (config.guard.mode === "off" || /(?:^|\s)--dry-run(?:\s|$)/i.test(command)) return false
-  return config.guard.commands.some((pattern) => new RegExp(pattern, "i").test(command))
+  if (config.guard.mode === "off") return false
+  const patterns = config.guard.commands.map((pattern) => new RegExp(pattern, "i"))
+  // --dry-run only exempts its own segment, so `git push --dry-run && git push`
+  // stays guarded.
+  return commandSegments(command).some(
+    (segment) =>
+      !/(?:^|\s)--dry-run(?:\s|$)/i.test(segment) &&
+      patterns.some((pattern) => pattern.test(segment)),
+  )
 }
