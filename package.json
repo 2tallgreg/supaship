@@ -1,0 +1,59 @@
+{
+  "name": "opencode-supaship",
+  "version": "0.1.0",
+  "description": "A deterministic Supabase shipping gate for OpenCode.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./scanner": {
+      "types": "./dist/sql-scanner.d.ts",
+      "import": "./dist/sql-scanner.js"
+    }
+  },
+  "bin": {
+    "supaship": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "schema.json",
+    "supaship.example.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "pack:check": "npm pack --dry-run --cache .npm-cache"
+  },
+  "dependencies": {
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.12",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "opencode",
+    "supabase",
+    "postgres",
+    "rls",
+    "migrations",
+    "developer-tools"
+  ],
+  "author": "Greg Pogg",
+  "license": "MIT",
+  "directories": {
+    "test": "test"
+  }
+}

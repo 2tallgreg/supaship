@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/opencode-supaship/schema.json",
+  "sqlDirectories": ["supabase/migrations", "supabase/schemas"],
+  "testDirectories": ["supabase/tests"],
+  "exposedSchemas": ["public"],
+  "generatedTypes": {
+    "path": "src/types/database.types.ts",
+    "command": "{supabase} gen types typescript --local",
+    "required": true
+  },
+  "guard": {
+    "mode": "block",
+    "requireFreshEvidence": true,
+    "blockOnWarnings": false,
+    "approvalMinutes": 30
+  }
+}

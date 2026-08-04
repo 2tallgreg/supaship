@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://supaship.dev/schema.json",
+  "title": "Supaship configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "sqlDirectories": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "testDirectories": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "exposedSchemas": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "baseRef": { "type": "string" },
+    "supabaseCommand": { "type": "string" },
+    "generatedTypes": {
+      "oneOf": [
+        { "const": false },
+        { "const": "auto" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "command", "required"],
+          "properties": {
+            "path": { "type": "string" },
+            "command": { "type": "string" },
+            "required": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "command", "required", "when"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "command": { "type": "string" },
+          "required": { "type": "boolean" },
+          "when": {
+            "enum": ["always", "supabase-changed", "database-tests-present"]
+          }
+        }
+      }
+    },
+    "guard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["block", "warn", "off"] },
+        "commands": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requireFreshEvidence": { "type": "boolean" },
+        "blockOnWarnings": { "type": "boolean" },
+        "approvalMinutes": { "type": "number", "minimum": 1 }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "propertyNames": { "pattern": "^SUPA0(?:0[1-9]|1[0-7])$" },
+      "additionalProperties": { "enum": ["error", "warning", "info", "off"] }
+    },
+    "stateFile": { "type": "string" },
+    "maxOutputChars": { "type": "integer", "minimum": 1000 }
+  }
+}
