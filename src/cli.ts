@@ -5,7 +5,7 @@ import path from "node:path"
 import process from "node:process"
 import { loadConfig } from "./config.js"
 import { SupashipEngine } from "./engine.js"
-import { formatShipReport } from "./format.js"
+import { formatEnvironmentReport, formatShipReport } from "./format.js"
 import type { ScanScope } from "./types.js"
 
 const HELP = `Supaship — deterministic Supabase shipping checks
@@ -13,11 +13,13 @@ const HELP = `Supaship — deterministic Supabase shipping checks
 Usage:
   supaship status [--all] [--json] [--config <path>]
   supaship verify [--all] [--json] [--config <path>]
+  supaship doctor [--json] [--config <path>]
   supaship init
 
 Commands:
   status   Inspect SQL and existing verification evidence without changing anything.
   verify   Run configured local checks and record fingerprinted evidence.
+  doctor   Report the Supabase CLI version, local stack state, and available commands.
   init     Create supaship.config.json in the current directory.
 `
 
@@ -35,6 +37,7 @@ async function init(root: string): Promise<void> {
     testDirectories: ["supabase/tests"],
     exposedSchemas: ["public"],
     generatedTypes: "auto",
+    preflight: true,
     guard: {
       mode: "block",
       requireFreshEvidence: true,
@@ -59,7 +62,7 @@ async function main(): Promise<void> {
     await init(root)
     return
   }
-  if (command !== "status" && command !== "verify") {
+  if (command !== "status" && command !== "verify" && command !== "doctor") {
     throw new Error(`Unknown command: ${command}\n\n${HELP}`)
   }
 
@@ -67,6 +70,18 @@ async function main(): Promise<void> {
   if (args.includes("--config") && !configPath) throw new Error("--config requires a path.")
   const config = loadConfig(root, configPath ? { config: configPath } : {})
   const engine = new SupashipEngine(root, config)
+
+  if (command === "doctor") {
+    const environment = await engine.doctor()
+    process.stdout.write(
+      args.includes("--json")
+        ? `${JSON.stringify(environment, null, 2)}\n`
+        : `${formatEnvironmentReport(environment)}\n`,
+    )
+    if (!environment.ready) process.exitCode = 1
+    return
+  }
+
   const scope: ScanScope = args.includes("--all") ? "all" : "changed"
   const report = command === "verify" ? await engine.verify({ scope }) : await engine.inspect(scope)
 

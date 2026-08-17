@@ -3,7 +3,7 @@ import path from "node:path"
 import test from "node:test"
 import Supaship from "../dist/index.js"
 
-test("exports the four OpenCode tools and shipping hooks", async () => {
+test("exports the five OpenCode tools and shipping hooks", async () => {
   const root = path.resolve(import.meta.dirname, "..")
   const hooks = await Supaship(
     {
@@ -24,6 +24,7 @@ test("exports the four OpenCode tools and shipping hooks", async () => {
 
   assert.deepEqual(Object.keys(hooks.tool ?? {}).sort(), [
     "supaship_approve",
+    "supaship_doctor",
     "supaship_status",
     "supaship_sync_types",
     "supaship_verify",

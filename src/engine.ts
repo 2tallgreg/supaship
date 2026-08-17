@@ -6,9 +6,12 @@ import { runCommand } from "./commands.js"
 import { activeApproval, emptyEvidence, loadEvidence, makeApproval, saveEvidence } from "./evidence.js"
 import { createSnapshot } from "./project.js"
 import { scanSql } from "./sql-scanner.js"
+import { blockingPreflight, diagnose, inspectCliEnvironment, isUnsupportedByCli, usesSupabaseCli } from "./supabase-cli.js"
 import type {
   CheckConfig,
+  CheckExpectation,
   CheckResult,
+  CliEnvironment,
   CommandResult,
   EvidenceState,
   Finding,
@@ -22,7 +25,7 @@ import type {
 export interface VerifyOptions {
   scope?: ScanScope
   signal?: AbortSignal
-  onCheckStart?: (check: CheckConfig | { id: "generated-types"; name: string; command: string }) => void
+  onCheckStart?: (check: { id: string; name: string; command: string }) => void
 }
 
 export interface SyncTypesResult {
@@ -101,6 +104,34 @@ function combinedOutput(result: CommandResult): string | undefined {
   return output || undefined
 }
 
+/**
+ * Some Supabase CLI commands report by output rather than exit code: `db diff`
+ * prints a schema delta and still exits 0. Returns the failure message when an
+ * expectation is violated.
+ */
+function violatedExpectation(
+  expectation: CheckExpectation | undefined,
+  result: CommandResult,
+): string | undefined {
+  if (!expectation) return undefined
+  if (expectation.stdoutMustBeEmpty && result.stdout.trim()) {
+    return expectation.message ?? "The command wrote output where none was expected."
+  }
+  if (expectation.stdoutMustNotMatch && new RegExp(expectation.stdoutMustNotMatch, "im").test(result.stdout)) {
+    return expectation.message ?? `Standard output matched ${expectation.stdoutMustNotMatch}.`
+  }
+  const combined = `${result.stdout}\n${result.stderr}`
+  if (expectation.outputMustNotMatch && new RegExp(expectation.outputMustNotMatch, "im").test(combined)) {
+    return expectation.message ?? `Command output matched ${expectation.outputMustNotMatch}.`
+  }
+  return undefined
+}
+
+/** A required check the CLI cannot run is recorded, not silently dropped. */
+function isUnsupported(check: CheckResult): boolean {
+  return check.status === "skipped" && check.skipReason === "unsupported"
+}
+
 function normalizeGeneratedTypes(value: string): string {
   return value.replaceAll("\r\n", "\n").trimEnd()
 }
@@ -123,8 +154,14 @@ export class SupashipEngine {
   private buildReport(snapshot: ProjectSnapshot, scan: ScanReport, evidence: EvidenceState): ShipReport {
     const staleEvidence = evidence.fingerprint !== snapshot.fingerprint
     const checks = staleEvidence ? [] : evidence.checks
-    const passed = new Set(checks.filter((check) => check.status === "passed").map((check) => check.id))
-    const missingEvidence = requiredCheckIds(this.config, snapshot).filter((id) => !passed.has(id))
+    // A check the installed CLI cannot run counts as satisfied — blocking on it
+    // would be unfixable without an upgrade — but it is named in the report.
+    const satisfied = new Set(
+      checks.filter((check) => check.status === "passed" || isUnsupported(check)).map((check) => check.id),
+    )
+    const required = requiredCheckIds(this.config, snapshot)
+    const missingEvidence = required.filter((id) => !satisfied.has(id))
+    const unsupportedChecks = checks.filter((check) => isUnsupported(check) && required.includes(check.id)).map((check) => check.id)
     const approval = activeApproval(evidence, snapshot.fingerprint)
     const staticBlocked =
       scan.summary.errors > 0 || (this.config.guard.blockOnWarnings && scan.summary.warnings > 0)
@@ -142,8 +179,10 @@ export class SupashipEngine {
       scan,
       checks,
       missingEvidence,
+      unsupportedChecks,
       staleEvidence,
       approval,
+      environment: staleEvidence ? undefined : evidence.environment,
     }
   }
 
@@ -168,9 +207,114 @@ export class SupashipEngine {
     return checks
   }
 
+  /**
+   * Reads the local Supabase CLI and stack without touching a database. Runs a
+   * fixed read-only allowlist: `--version`, `status`, and `--help` probes.
+   */
+  async doctor(signal?: AbortSignal): Promise<CliEnvironment> {
+    // A diagnostic must survive the problems it diagnoses, including an
+    // unresolvable baseRef, so snapshot failure falls back to the given root.
+    let root = this.root
+    try {
+      root = (await createSnapshot(this.root, this.config, "changed")).root
+    } catch {
+      // Keep this.root.
+    }
+    return inspectCliEnvironment(root, this.config, { signal, probeCapabilities: true })
+  }
+
   async verify(options: VerifyOptions = {}): Promise<ShipReport> {
     const { snapshot, scan } = await this.snapshotAndScan(options.scope ?? "changed")
     const results: CheckResult[] = []
+    const applicable = this.config.checks.filter((check) => applies(check, snapshot))
+    const generated = snapshot.supabaseChanged ? this.config.generatedTypes : false
+
+    // Reading the environment once costs two inert commands and turns a
+    // six-minute `db reset` timeout into an immediate "start Docker".
+    const needsCli =
+      applicable.some((check) => usesSupabaseCli(check.command)) ||
+      (generated ? usesSupabaseCli(generated.command) : false)
+    const environment =
+      this.config.preflight && needsCli
+        ? await inspectCliEnvironment(snapshot.root, this.config, { signal: options.signal })
+        : undefined
+    const blockers = environment ? blockingPreflight(environment) : []
+
+    const run = async (
+      descriptor: {
+        id: string
+        name: string
+        command: string
+        required: boolean
+        expect?: CheckExpectation
+        /** Set for commands whose successful output is the artifact itself. */
+        quietOnSuccess?: boolean
+      },
+    ): Promise<{ result: CheckResult; command: CommandResult | undefined }> => {
+      const { id, name, command, required } = descriptor
+
+      const blocker = blockers[0]
+      if (blocker && usesSupabaseCli(command)) {
+        return {
+          result: {
+            id,
+            name,
+            command,
+            required,
+            status: "failed",
+            durationMs: 0,
+            message: `Not run: ${blocker.detail}`,
+            remedy: blocker.remedy,
+          },
+          command: undefined,
+        }
+      }
+
+      options.onCheckStart?.({ id, name, command })
+      const result = await runCommand(command, snapshot.root, {
+        signal: options.signal,
+        maxOutputChars: this.config.maxOutputChars,
+      })
+      const output = combinedOutput(result)
+
+      if (result.exitCode !== 0 && isUnsupportedByCli(output)) {
+        return {
+          result: {
+            id,
+            name,
+            command,
+            required,
+            status: "skipped",
+            skipReason: "unsupported",
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+            message: "The installed Supabase CLI does not support this command.",
+            remedy: diagnose(output),
+          },
+          command: result,
+        }
+      }
+
+      const violation = result.exitCode === 0 ? violatedExpectation(descriptor.expect, result) : undefined
+      const failed = result.exitCode !== 0 || Boolean(violation)
+      return {
+        result: {
+          id,
+          name,
+          command,
+          required,
+          status: failed ? "failed" : "passed",
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          // Advisor and lint warnings below the failure threshold only survive
+          // if a passing check keeps its output.
+          output: failed || !descriptor.quietOnSuccess ? output : undefined,
+          message: violation,
+          remedy: failed ? diagnose(output) : undefined,
+        },
+        command: result,
+      }
+    }
 
     for (const check of this.config.checks) {
       const command = materializeCommand(check.command, this.config)
@@ -181,69 +325,41 @@ export class SupashipEngine {
           command,
           required: check.required,
           status: "skipped",
+          skipReason: "not-applicable",
           durationMs: 0,
           message: `Not applicable for ${snapshot.scope} scope.`,
         })
         continue
       }
-
-      options.onCheckStart?.({ ...check, command })
-      const result = await runCommand(command, snapshot.root, {
-        signal: options.signal,
-        maxOutputChars: this.config.maxOutputChars,
-      })
-      results.push({
-        id: check.id,
-        name: check.name,
-        command,
-        required: check.required,
-        status: result.exitCode === 0 ? "passed" : "failed",
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        output: combinedOutput(result),
-      })
+      results.push((await run({ ...check, command })).result)
     }
 
-    if (snapshot.supabaseChanged && this.config.generatedTypes) {
-      const generated = this.config.generatedTypes
+    if (generated) {
       const command = materializeCommand(generated.command, this.config)
-      options.onCheckStart?.({
-        id: "generated-types",
-        name: `Compare generated types with ${generated.path}`,
-        command,
-      })
-      const result = await runCommand(command, snapshot.root, {
-        signal: options.signal,
-        maxOutputChars: this.config.maxOutputChars,
-      })
-      let status: CheckResult["status"] = result.exitCode === 0 ? "passed" : "failed"
-      let message: string | undefined
-
-      if (status === "passed") {
-        const target = path.resolve(snapshot.root, generated.path)
-        if (!existsSync(target)) {
-          status = "failed"
-          message = `${generated.path} does not exist.`
-        } else {
-          const current = await readFile(target, "utf8")
-          if (normalizeGeneratedTypes(current) !== normalizeGeneratedTypes(result.stdout)) {
-            status = "failed"
-            message = `${generated.path} is stale. Run the supaship_sync_types tool.`
-          }
-        }
-      }
-
-      results.push({
+      const { result, command: raw } = await run({
         id: "generated-types",
         name: `Generated types match ${generated.path}`,
         command,
         required: generated.required,
-        status,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        output: status === "failed" ? combinedOutput(result) : undefined,
-        message,
+        // A successful run prints the whole types file; storing it is noise.
+        quietOnSuccess: true,
       })
+
+      if (result.status === "passed" && raw) {
+        const target = path.resolve(snapshot.root, generated.path)
+        if (!existsSync(target)) {
+          result.status = "failed"
+          result.message = `${generated.path} does not exist.`
+        } else {
+          const current = await readFile(target, "utf8")
+          if (normalizeGeneratedTypes(current) !== normalizeGeneratedTypes(raw.stdout)) {
+            result.status = "failed"
+            result.message = `${generated.path} is stale.`
+            result.remedy = "Run the supaship_sync_types tool, or `supabase gen types typescript --local > " + generated.path + "`."
+          }
+        }
+      }
+      results.push(result)
     }
 
     const previous = await loadEvidence(snapshot.root, this.config.stateFile)
@@ -253,6 +369,7 @@ export class SupashipEngine {
       verifiedAt: new Date().toISOString(),
       checks: results,
       approval: activeApproval(previous, snapshot.fingerprint),
+      environment,
     }
     await saveEvidence(snapshot.root, this.config.stateFile, state)
     return this.buildReport(snapshot, scan, state)

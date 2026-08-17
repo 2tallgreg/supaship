@@ -47,10 +47,28 @@
         "properties": {
           "id": { "type": "string" },
           "name": { "type": "string" },
-          "command": { "type": "string" },
+          "command": {
+            "type": "string",
+            "description": "{supabase} resolves to the project's CLI binary; {schemas} to the exposed schema list."
+          },
           "required": { "type": "boolean" },
           "when": {
             "enum": ["always", "supabase-changed", "database-tests-present"]
+          },
+          "expect": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Assertions on command output, for CLI commands that report by output rather than exit code.",
+            "properties": {
+              "stdoutMustBeEmpty": { "type": "boolean" },
+              "stdoutMustNotMatch": { "type": "string", "format": "regex" },
+              "outputMustNotMatch": { "type": "string", "format": "regex" },
+              "message": { "type": "string" }
+            }
+          },
+          "allowRemoteWrites": {
+            "type": "boolean",
+            "description": "Permit a check that writes to a linked or remote database. Rejected by default."
           }
         }
       }
@@ -75,6 +93,10 @@
       "additionalProperties": { "enum": ["error", "warning", "info", "off"] }
     },
     "stateFile": { "type": "string" },
-    "maxOutputChars": { "type": "integer", "minimum": 1000 }
+    "maxOutputChars": { "type": "integer", "minimum": 1000 },
+    "preflight": {
+      "type": "boolean",
+      "description": "Read the Supabase CLI version and local stack state before running Supabase checks."
+    }
   }
 }
