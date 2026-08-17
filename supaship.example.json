@@ -3,11 +3,53 @@
   "sqlDirectories": ["supabase/migrations", "supabase/schemas"],
   "testDirectories": ["supabase/tests"],
   "exposedSchemas": ["public"],
+  "preflight": true,
   "generatedTypes": {
     "path": "src/types/database.types.ts",
     "command": "{supabase} gen types typescript --local",
     "required": true
   },
+  "checks": [
+    {
+      "id": "db-drift",
+      "name": "Local database matches committed migrations",
+      "command": "{supabase} db diff --local --schema {schemas}",
+      "required": false,
+      "when": "supabase-changed",
+      "expect": {
+        "stdoutMustNotMatch": "^\\s*(?:create|alter|drop|revoke|grant)\\b",
+        "message": "The local database has schema changes that are not in a migration. Capture them with `supabase db diff -f <name>` before `supabase db reset` discards them."
+      }
+    },
+    {
+      "id": "db-reset",
+      "name": "Rebuild the local database from migrations",
+      "command": "{supabase} db reset",
+      "required": true,
+      "when": "supabase-changed"
+    },
+    {
+      "id": "db-lint",
+      "name": "Lint database functions and schema",
+      "command": "{supabase} db lint --local --level error --fail-on error",
+      "required": true,
+      "when": "supabase-changed"
+    },
+    {
+      "id": "db-advisors",
+      "name": "Supabase security advisors on the local database",
+      "command": "{supabase} db advisors --local --type security --fail-on error",
+      "required": true,
+      "when": "supabase-changed"
+    },
+    {
+      "id": "db-tests",
+      "name": "Run pgTAP database tests",
+      "command": "{supabase} test db",
+      "required": true,
+      "when": "database-tests-present"
+    }
+  ],
   "guard": {
     "mode": "block",
     "requireFreshEvidence": true,

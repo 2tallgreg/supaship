@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
+import { writesToRemoteDatabase } from "./supabase-cli.js"
 import type {
   GeneratedTypesConfig,
   ResolvedConfig,
@@ -55,6 +56,20 @@ export const DEFAULT_CONFIG: SupashipConfig = {
   supabaseCommand: "auto",
   generatedTypes: "auto",
   checks: [
+    // Runs before db-reset on purpose: `db reset` recreates the local database
+    // from migrations, so any uncommitted local schema change is gone after it.
+    {
+      id: "db-drift",
+      name: "Local database matches committed migrations",
+      command: "{supabase} db diff --local --schema {schemas}",
+      required: false,
+      when: "supabase-changed",
+      expect: {
+        stdoutMustNotMatch: String.raw`^\s*(?:create|alter|drop|revoke|grant)\b`,
+        message:
+          "The local database has schema changes that are not in a migration. `supabase db reset` will discard them — capture them first with `supabase db diff -f <name>`.",
+      },
+    },
     {
       id: "db-reset",
       name: "Rebuild the local database from migrations",
@@ -65,7 +80,17 @@ export const DEFAULT_CONFIG: SupashipConfig = {
     {
       id: "db-lint",
       name: "Lint database functions and schema",
-      command: "{supabase} db lint --level error",
+      command: "{supabase} db lint --local --level error --fail-on error",
+      required: true,
+      when: "supabase-changed",
+    },
+    // `db advisors` re-checks against the rebuilt database what the static
+    // scanner can only infer from SQL text: missing RLS, exposed auth.users,
+    // definer views, unindexed foreign keys.
+    {
+      id: "db-advisors",
+      name: "Supabase security advisors on the local database",
+      command: "{supabase} db advisors --local --type security --fail-on error",
       required: true,
       when: "supabase-changed",
     },
@@ -81,6 +106,14 @@ export const DEFAULT_CONFIG: SupashipConfig = {
     mode: "block",
     commands: [
       String.raw`\bsupabase\s+db\s+push\b`,
+      // Local by default; only the remote-targeting forms are shipping actions.
+      String.raw`\bsupabase\s+db\s+(?:reset|query)\b(?=[^\n]*--(?:linked|db-url))`,
+      String.raw`\bsupabase\s+migration\s+(?:up|down|squash)\b(?=[^\n]*--(?:linked|db-url))`,
+      String.raw`\bsupabase\s+migration\s+repair\b`,
+      String.raw`\bsupabase\s+functions\s+(?:deploy|delete)\b`,
+      String.raw`\bsupabase\s+secrets\s+(?:set|unset)\b`,
+      String.raw`\bsupabase\s+config\s+push\b`,
+      String.raw`\bsupabase\s+branches\s+(?:create|delete|update)\b`,
       String.raw`\bgit\s+push\b`,
       String.raw`\bgh\s+pr\s+(?:create|merge)\b`,
     ],
@@ -91,6 +124,7 @@ export const DEFAULT_CONFIG: SupashipConfig = {
   rules: DEFAULT_RULES,
   stateFile: ".opencode/supaship/state.json",
   maxOutputChars: 8_000,
+  preflight: true,
 }
 
 const TYPE_CANDIDATES = [
@@ -156,6 +190,15 @@ function detectGeneratedTypes(root: string): GeneratedTypesConfig | false {
   return false
 }
 
+/**
+ * Safety classification reads the command as written, not as resolved: the
+ * resolved binary may be a path like `./node_modules/.bin/supabase`, and a
+ * project-local wrapper would otherwise hide `db push` from the check.
+ */
+function canonicalCommand(command: string): string {
+  return command.replaceAll("{supabase}", "supabase")
+}
+
 function validate(config: ResolvedConfig): void {
   if (!config.sqlDirectories.length) throw new Error("sqlDirectories must contain at least one path")
   if (!config.exposedSchemas.length) throw new Error("exposedSchemas must contain at least one schema")
@@ -167,6 +210,27 @@ function validate(config: ResolvedConfig): void {
     if (!check.id || !check.command) throw new Error("Every check needs a non-empty id and command")
     if (ids.has(check.id)) throw new Error(`Duplicate check id: ${check.id}`)
     ids.add(check.id)
+    // Verification runs without the guard in front of it, so a remote-writing
+    // check would push straight to production during `supaship verify`.
+    if (!check.allowRemoteWrites && writesToRemoteDatabase(canonicalCommand(check.command))) {
+      throw new Error(
+        `Check ${check.id} writes to a linked or remote database: ${check.command}. Target the local stack instead, or set "allowRemoteWrites": true on that check to accept the risk.`,
+      )
+    }
+    for (const [field, pattern] of [
+      ["stdoutMustNotMatch", check.expect?.stdoutMustNotMatch],
+      ["outputMustNotMatch", check.expect?.outputMustNotMatch],
+    ] as const) {
+      if (pattern === undefined) continue
+      try {
+        new RegExp(pattern, "im")
+      } catch (error) {
+        throw new Error(`Check ${check.id} has an invalid ${field} pattern: ${String(error)}`)
+      }
+    }
+  }
+  if (config.generatedTypes && writesToRemoteDatabase(canonicalCommand(config.generatedTypes.command))) {
+    throw new Error(`generatedTypes.command writes to a remote database: ${config.generatedTypes.command}`)
   }
   for (const pattern of config.guard.commands) {
     try {
@@ -184,7 +248,9 @@ function validate(config: ResolvedConfig): void {
 }
 
 export function materializeCommand(command: string, config: ResolvedConfig): string {
-  return command.replaceAll("{supabase}", config.supabaseCommand)
+  return command
+    .replaceAll("{supabase}", config.supabaseCommand)
+    .replaceAll("{schemas}", config.exposedSchemas.join(","))
 }
 
 export function loadConfig(

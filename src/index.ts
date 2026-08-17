@@ -3,7 +3,7 @@ import { z } from "zod"
 import { isGuardedCommand } from "./commands.js"
 import { loadConfig, materializeCommand } from "./config.js"
 import { SupashipEngine } from "./engine.js"
-import { formatCompactReport, formatShipReport } from "./format.js"
+import { formatCompactReport, formatEnvironmentReport, formatShipReport } from "./format.js"
 import type { ScanScope } from "./types.js"
 
 function defineTool<Args extends z.ZodRawShape>(input: {
@@ -16,8 +16,14 @@ function defineTool<Args extends z.ZodRawShape>(input: {
 
 export { loadConfig } from "./config.js"
 export { SupashipEngine } from "./engine.js"
-export { formatShipReport } from "./format.js"
+export { formatEnvironmentReport, formatShipReport } from "./format.js"
 export { scanSql, RULE_DESCRIPTIONS } from "./sql-scanner.js"
+export {
+  diagnose,
+  inspectCliEnvironment,
+  usesSupabaseCli,
+  writesToRemoteDatabase,
+} from "./supabase-cli.js"
 export type * from "./types.js"
 
 export const Supaship: Plugin = async ({ client, directory, worktree }, options = {}) => {
@@ -60,9 +66,32 @@ export const Supaship: Plugin = async ({ client, directory, worktree }, options 
         },
       }),
 
+      supaship_doctor: defineTool({
+        description:
+          "Report the local Supabase CLI version, container stack state, linked project, and which CLI subcommands are available, with a fix for every problem found. Runs only read-only commands: supabase --version, supabase status, and --help probes.",
+        args: {
+          format: z.enum(["text", "json"]).optional().describe("Return a readable report or structured JSON."),
+        },
+        async execute(args, context) {
+          const environment = await engine.doctor(context.abort)
+          context.metadata({
+            title: `Supabase CLI ${environment.ready ? "ready" : "not ready"}`,
+            metadata: {
+              ready: environment.ready,
+              version: environment.version,
+              linked: Boolean(environment.linkedProjectRef),
+              advisors: environment.capabilities.advisors,
+            },
+          })
+          return args.format === "json"
+            ? JSON.stringify(environment, null, 2)
+            : formatEnvironmentReport(environment)
+        },
+      }),
+
       supaship_verify: defineTool({
         description:
-          "Run the configured local Supabase rebuild, lint, pgTAP, and generated-type checks, then record fingerprinted shipping evidence.",
+          "Run the configured local Supabase checks — migration drift, database rebuild, lint, security advisors, pgTAP, and generated types — then record fingerprinted shipping evidence.",
         args: {
           scope: z.enum(["changed", "all"]).optional().describe("Verify changed SQL or the full configured SQL set."),
         },
@@ -176,7 +205,10 @@ export const Supaship: Plugin = async ({ client, directory, worktree }, options 
 
     "experimental.chat.system.transform": async (_input, output) => {
       output.system.push(
-        "Supaship guards this repository's Supabase delivery. Before pushing migrations, creating or merging a PR, or claiming database work is complete, call supaship_status and obtain fresh supaship_verify evidence. Never bypass a Supaship block without the user's explicit supaship_approve confirmation.",
+        [
+          "Supaship guards this repository's Supabase delivery. Before pushing migrations, creating or merging a PR, or claiming database work is complete, call supaship_status and obtain fresh supaship_verify evidence. Never bypass a Supaship block without the user's explicit supaship_approve confirmation.",
+          "Supabase CLI rules in this repository: verify against the local stack only. `supabase db diff`, `db reset`, `db lint`, `db advisors`, and `migration up` are local unless you pass `--linked` or `--db-url`, while `db push`, `db pull`, and `db dump` target the linked project by default. Write schema changes as migration files and rebuild with `supabase db reset`; never hand-edit an already-applied migration. When a Supabase command fails, run supaship_doctor before retrying — it reports the CLI version, stack state, and the missing prerequisite.",
+        ].join(" "),
       )
     },
 

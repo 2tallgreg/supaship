@@ -52,12 +52,27 @@ export interface ScanReport {
 
 export type CheckWhen = "always" | "supabase-changed" | "database-tests-present"
 
+/**
+ * Several Supabase CLI commands report by output rather than exit code —
+ * `db diff` prints a schema delta and still exits 0 — so a check can assert on
+ * what the command wrote.
+ */
+export interface CheckExpectation {
+  stdoutMustBeEmpty?: boolean
+  stdoutMustNotMatch?: string
+  outputMustNotMatch?: string
+  message?: string
+}
+
 export interface CheckConfig {
   id: string
   name: string
   command: string
   required: boolean
   when: CheckWhen
+  expect?: CheckExpectation
+  /** Opt in to a check that writes to a linked or remote database. */
+  allowRemoteWrites?: boolean
 }
 
 export interface GeneratedTypesConfig {
@@ -87,6 +102,8 @@ export interface SupashipConfig {
   rules: Partial<Record<RuleId, RuleLevel>>
   stateFile: string
   maxOutputChars: number
+  /** Read the CLI and local stack before running Supabase checks. */
+  preflight: boolean
 }
 
 export interface ResolvedConfig extends Omit<SupashipConfig, "generatedTypes" | "rules"> {
@@ -106,6 +123,8 @@ export interface ProjectSnapshot {
   fingerprint: string
 }
 
+export type SkipReason = "not-applicable" | "unsupported" | "preflight"
+
 export interface CheckResult {
   id: string
   name: string
@@ -116,6 +135,36 @@ export interface CheckResult {
   durationMs: number
   output?: string
   message?: string
+  skipReason?: SkipReason
+  /** A concrete next step derived from the CLI's own output. */
+  remedy?: string
+}
+
+export type PreflightStatus = "ok" | "warning" | "blocked" | "unknown"
+
+export type PreflightId = "cli" | "project" | "docker" | "stack" | "link" | "capabilities"
+
+export interface PreflightCheck {
+  id: PreflightId
+  status: PreflightStatus
+  detail: string
+  remedy?: string
+}
+
+export interface CliCapabilities {
+  advisors: boolean
+  lintFailOn: boolean
+  declarativeSchema: boolean
+}
+
+export interface CliEnvironment {
+  command: string
+  version?: string
+  capabilities: CliCapabilities
+  checks: PreflightCheck[]
+  linkedProjectRef?: string
+  /** False when a blocking problem means local checks cannot succeed. */
+  ready: boolean
 }
 
 export interface Approval {
@@ -131,6 +180,7 @@ export interface EvidenceState {
   verifiedAt?: string
   checks: CheckResult[]
   approval?: Approval
+  environment?: CliEnvironment
 }
 
 export interface ShipReport {
@@ -143,8 +193,11 @@ export interface ShipReport {
   scan: ScanReport
   checks: CheckResult[]
   missingEvidence: string[]
+  /** Required checks the installed CLI cannot run; recorded, never silent. */
+  unsupportedChecks: string[]
   staleEvidence: boolean
   approval?: Approval
+  environment?: CliEnvironment
 }
 
 export interface CommandResult {

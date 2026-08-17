@@ -1,4 +1,35 @@
-import type { ShipReport } from "./types.js"
+import type { CliEnvironment, ShipReport } from "./types.js"
+
+const PREFLIGHT_MARK: Record<string, string> = { ok: "✓", warning: "!", blocked: "✗", unknown: "?" }
+
+/** Renders the local Supabase CLI environment, remedies included. */
+export function formatEnvironmentReport(environment: CliEnvironment): string {
+  const lines = [
+    `SUPABASE CLI: ${environment.ready ? "READY" : "NOT READY"}`,
+    `Binary: ${environment.command}${environment.version ? ` (v${environment.version})` : ""}`,
+  ]
+  if (environment.linkedProjectRef) lines.push(`Linked project: ${environment.linkedProjectRef}`)
+
+  lines.push("", "Environment:")
+  for (const check of environment.checks) {
+    lines.push(`  ${PREFLIGHT_MARK[check.status] ?? "?"} ${check.id} — ${check.detail}`)
+    if (check.remedy) lines.push(`    Fix: ${check.remedy}`)
+  }
+
+  // Capabilities are probed against the installed binary; without one there is
+  // nothing to report but the install step above.
+  if (environment.version) {
+    const { advisors, lintFailOn, declarativeSchema } = environment.capabilities
+    lines.push(
+      "",
+      "Command support:",
+      `  ${advisors ? "✓" : "✗"} supabase db advisors`,
+      `  ${lintFailOn ? "✓" : "✗"} supabase db lint --fail-on`,
+      `  ${declarativeSchema ? "✓" : "✗"} supabase db schema declarative`,
+    )
+  }
+  return lines.join("\n")
+}
 
 function mark(status: "passed" | "failed" | "skipped"): string {
   if (status === "passed") return "✓"
@@ -23,6 +54,23 @@ export function formatShipReport(report: ShipReport): string {
   if (!report.changedPaths.length) lines.push("Changes: no project changes detected")
   else lines.push(`Changes: ${report.changedPaths.length} file(s)`)
 
+  const blocked = report.environment?.checks.filter((check) => check.status === "blocked") ?? []
+  // A remedy printed once for the environment is not repeated on every check it
+  // stopped; that turns one problem into a wall of identical advice.
+  const alreadyAdvised = new Set<string>()
+  if (blocked.length) {
+    lines.push("", "Supabase CLI environment:")
+    for (const check of blocked) {
+      lines.push(`  ✗ ${check.id} — ${check.detail}`)
+      if (check.remedy) {
+        lines.push(`    Fix: ${check.remedy}`)
+        alreadyAdvised.add(check.remedy)
+      }
+    }
+  } else if (report.environment?.version) {
+    lines.push(`Supabase CLI: v${report.environment.version}, local stack reachable`)
+  }
+
   if (report.checks.length) {
     lines.push("", "Verification:")
     for (const check of report.checks) {
@@ -32,7 +80,15 @@ export function formatShipReport(report: ShipReport): string {
         const firstLine = check.output.split("\n").find(Boolean)
         if (firstLine) lines.push(`    ${firstLine}`)
       }
+      if (check.remedy && !alreadyAdvised.has(check.remedy)) lines.push(`    Fix: ${check.remedy}`)
     }
+  }
+
+  if (report.unsupportedChecks.length) {
+    lines.push(
+      "",
+      `Not run by this Supabase CLI: ${report.unsupportedChecks.join(", ")}. Upgrade the CLI to restore these checks.`,
+    )
   }
 
   if (report.missingEvidence.length) {
